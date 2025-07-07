@@ -50,3 +50,40 @@ css
 編輯
 git --version
 應該就能正常顯示了！
+
+#####
+你第一次用 git commit，git 告訴你「Author identity unknown」，要你設定 user.name 和 user.email。
+
+你還沒設定過 git 的「身分資訊」。
+
+現在 commit 不會成功，直到你設定完畢。
+
+處理方式與說明
+你只要執行下面兩行指令，把你的名字和 email 換成你自己的即可：
+bash
+複製
+編輯
+git config --global user.name "你的名字"
+git config --global user.email "你的 email"
+例如：
+
+bash
+複製
+編輯
+git config --global user.name "William"
+git config --global user.email "william@example.com"
+這樣會設定成「全系統預設」身分（推薦），以後所有 git 專案都會套用這個名字/email。
+
+如果你只想針對單一專案設定（例如：家用/公司要分開）
+把 --global 拿掉，這樣只會寫進目前專案：
+
+bash
+複製
+編輯
+git config user.name "William"
+git config user.email "william@example.com"
+設定完成後，再 commit 就不會跳錯
+bash
+複製
+編輯
+git commit -m "find boss first version"
