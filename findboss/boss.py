@@ -11,7 +11,26 @@ from pynput import keyboard
 from rapidocr import RapidOCR
 from PIL import Image
 
-# ===== 全域參數區 =====
+# ===== NB/PC 圖片路徑與 webhook 切換 =====
+PATH_NB = "target/nb"
+PATH_PC = "target/pc"
+PATH_IMG = PATH_NB  # <--- NB or PC，這裡切換
+
+WEBHOOK_NB = 'https://discordapp.com/api/webhooks/1388593414391464006/GWMx8K2fYSCDxl6HUOql9foXFOLDvhy4x2QUdO5OcITtpoAQ8TLV8eMRS8O7Pe_ud-yf'
+WEBHOOK_PC = 'https://discordapp.com/api/webhooks/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+WEBHOOK_URL = WEBHOOK_NB  # <--- NB or PC，這裡切換
+
+# 所有圖片檔都拼在 PATH_IMG 下面
+DETECT_TARGETS = [
+    f"{PATH_IMG}/catalog.png",
+    f"{PATH_IMG}/channel.png",
+    f"{PATH_IMG}/random_change.png",
+    f"{PATH_IMG}/confirm.png",
+    f"{PATH_IMG}/login.png",
+    f"{PATH_IMG}/choosing.png",
+]
+
+# ===== 其餘全域參數區 =====
 BOSS_NAME_MAP = {
     '大菇菇': '大菇菇',
     '書生': '書生',
@@ -24,24 +43,14 @@ BOSS_NAME_MAP = {
     '歡樂': '未知Boss',
     # ...可持續擴充
 }
-KEY_START = 'r'   # 啟動/續行（預設 r）
+KEY_START = 'r'   # 啟動/續行
 KEY_EXIT  = 'q'   # 結束
 KEY_PAUSE = 'p'   # 暫停/恢復
-WEBHOOK_URL = 'https://discordapp.com/api/webhooks/1388593414391464006/GWMx8K2fYSCDxl6HUOql9foXFOLDvhy4x2QUdO5OcITtpoAQ8TLV8eMRS8O7Pe_ud-yf'
 
-SEND_CHANNEL_IMAGE = True   # 是否傳送頻道截圖
-SEND_CHANNEL_TEXT = True    # 是否傳送OCR頻道文字（一行通知）
+SEND_CHANNEL_IMAGE = True
+SEND_CHANNEL_TEXT = True
+AUTO_CONTINUE_AFTER_NOTIFY = True
 
-AUTO_CONTINUE_AFTER_NOTIFY = True  # True=自動繼續，False=找到王後等你再按啟動鍵
-
-DETECT_TARGETS = [
-    'target/catalog.png',
-    'target/channel.png',
-    'target/random_change.png',
-    'target/confirm.png',
-    'target/login.png',
-    'target/choosing.png',
-]
 OCR_BBOX = {'top': 100, 'left': 400, 'width': 1200, 'height': 500}
 OCR_QUEUE_SIZE = 10
 OCR_INTERVAL = 0.3
@@ -59,8 +68,8 @@ MOVE_RANDOM_Y = (100, 500)
 MOVE_TO_DELAY = 0.2
 MOVE_CLICK_RANDOM_OFFSET = 5
 
-POST_NOTIFY_WAIT = 3        # 發送通知後等待幾秒（可調）
-POST_NOTIFY_KEY = 'esc'     # 要按的按鍵（可調, pyautogui 支援的 key）
+POST_NOTIFY_WAIT = 3
+POST_NOTIFY_KEY = 'esc'
 
 pyautogui.FAILSAFE = False
 running = True
@@ -140,11 +149,11 @@ def detect_and_click(png, speed=None):
             now = time.time()
             if now - start_time > 1:
                 if 'confirm' in png:
-                    detect_and_click('target/confirm_timeout.png')
+                    detect_and_click(f"{PATH_IMG}/confirm_timeout.png")
                 elif 'login' in png:
-                    detect_and_click('target/login_timeout.png')
+                    detect_and_click(f"{PATH_IMG}/login_timeout.png")
                 elif 'choosing' in png:
-                    detect_and_click('target/choosing_timeout.png')
+                    detect_and_click(f"{PATH_IMG}/choosing_timeout.png")
     if location is None:
         print(f"[WARN] {png} 找不到圖，跳過此步驟")
         return
@@ -180,7 +189,6 @@ def auto_finder():
                 boss_name = confirm_boss()
                 if boss_name:
                     channel_text = capture_and_send_channel_info(boss_name)
-                    # 一行式通知
                     if SEND_CHANNEL_TEXT:
                         msg = f"頻道{channel_text} 找到 {boss_name}！"
                         send_discord_text(msg)
@@ -219,9 +227,9 @@ def ocr_channel_img(img):
         return "?"
 
 def capture_and_send_channel_info(boss_name):
-    detect_and_click('target/catalog.png')
+    detect_and_click(f"{PATH_IMG}/catalog.png")
     time.sleep(CATALOG_CLICK_DELAY)
-    detect_and_click('target/channel.png')
+    detect_and_click(f"{PATH_IMG}/channel.png")
     time.sleep(CHANNEL_CLICK_DELAY)
     os.makedirs(CHANNEL_CAPTURE_DIR, exist_ok=True)
     fname = f"{CHANNEL_CAPTURE_DIR}/channel_{int(time.time()*1000)}.png"
