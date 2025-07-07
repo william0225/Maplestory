@@ -1,0 +1,8 @@
+pyautogui
+mss
+pynput
+onnxruntime
+requests
+rapidocr
+pillow
+
