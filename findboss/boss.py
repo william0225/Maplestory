@@ -14,11 +14,11 @@ from PIL import Image
 # ===== NB/PC 圖片路徑與 webhook 切換 =====
 PATH_NB = "target/nb"
 PATH_PC = "target/pc"
-PATH_IMG = PATH_NB  # <--- NB or PC，這裡切換
+PATH_IMG = PATH_PC  # <--- NB or PC，這裡切換
 
 WEBHOOK_NB = 'https://discordapp.com/api/webhooks/1388593414391464006/GWMx8K2fYSCDxl6HUOql9foXFOLDvhy4x2QUdO5OcITtpoAQ8TLV8eMRS8O7Pe_ud-yf'
-WEBHOOK_PC = 'https://discordapp.com/api/webhooks/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
-WEBHOOK_URL = WEBHOOK_NB  # <--- NB or PC，這裡切換
+WEBHOOK_PC = 'https://discord.com/api/webhooks/1388593414391464006/GWMx8K2fYSCDxl6HUOql9foXFOLDvhy4x2QUdO5OcITtpoAQ8TLV8eMRS8O7Pe_ud-yf' 
+WEBHOOK_URL = WEBHOOK_PC  # <--- NB or PC，這裡切換
 
 # 所有圖片檔都拼在 PATH_IMG 下面
 DETECT_TARGETS = [
@@ -40,7 +40,9 @@ BOSS_NAME_MAP = {
     '叫聲': '未知Boss',
     '深山': '未知Boss',
     '仙人': '未知Boss',
-    '歡樂': '未知Boss',
+    '歡樂': '雪毛怪人',
+    '狐':   '九尾狐',
+    '存在': '巴洛古',
     # ...可持續擴充
 }
 KEY_START = 'r'   # 啟動/續行
