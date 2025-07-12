@@ -7,6 +7,7 @@ import requests
 import queue
 import os
 import re
+import sys
 from pynput import keyboard
 from rapidocr import RapidOCR
 from PIL import Image
@@ -14,13 +15,12 @@ from PIL import Image
 # ===== NB/PC 圖片路徑與 webhook 切換 =====
 PATH_NB = "target/nb"
 PATH_PC = "target/pc"
-PATH_IMG = PATH_PC  # <--- NB or PC，這裡切換
+PATH_IMG = PATH_NB  # <--- NB or PC，這裡切換
 
 WEBHOOK_NB = 'https://discordapp.com/api/webhooks/1388593414391464006/GWMx8K2fYSCDxl6HUOql9foXFOLDvhy4x2QUdO5OcITtpoAQ8TLV8eMRS8O7Pe_ud-yf'
-WEBHOOK_PC = 'https://discord.com/api/webhooks/1388593414391464006/GWMx8K2fYSCDxl6HUOql9foXFOLDvhy4x2QUdO5OcITtpoAQ8TLV8eMRS8O7Pe_ud-yf' 
-WEBHOOK_URL = WEBHOOK_PC  # <--- NB or PC，這裡切換
+WEBHOOK_PC = 'https://discord.com/api/webhooks/xxx'
+WEBHOOK_URL = WEBHOOK_NB  # <--- NB or PC，這裡切換
 
-# 所有圖片檔都拼在 PATH_IMG 下面
 DETECT_TARGETS = [
     f"{PATH_IMG}/catalog.png",
     f"{PATH_IMG}/channel.png",
@@ -43,21 +43,20 @@ BOSS_NAME_MAP = {
     '歡樂': '雪毛怪人',
     '狐':   '九尾狐',
     '存在': '巴洛古',
-    # ...可持續擴充
 }
-KEY_START = 'r'   # 啟動/續行
-KEY_EXIT  = 'q'   # 結束
-KEY_PAUSE = 'p'   # 暫停/恢復
+KEY_START = 'r'
+KEY_EXIT  = 'q'
+KEY_PAUSE = 'p'
 
-SEND_CHANNEL_IMAGE = True
+SEND_CHANNEL_IMAGE = False
 SEND_CHANNEL_TEXT = True
-AUTO_CONTINUE_AFTER_NOTIFY = True
+AUTO_CONTINUE_AFTER_NOTIFY = False
 
 OCR_BBOX = {'top': 100, 'left': 400, 'width': 1200, 'height': 500}
 OCR_QUEUE_SIZE = 10
 OCR_INTERVAL = 0.3
 OCR_TIMEOUT = 20
-SAVE_OCR_IMG = True
+SAVE_OCR_IMG = False
 OCR_SAVE_DIR = "debug/ocr"
 
 CHANNEL_CAPTURE_DIR = "debug/channel_info"
@@ -73,10 +72,21 @@ MOVE_CLICK_RANDOM_OFFSET = 5
 POST_NOTIFY_WAIT = 3
 POST_NOTIFY_KEY = 'esc'
 
+STAGE_TIMEOUT = 60
+SLEEP_BEFORE_FIND = 1.0   # 每輪找圖前等待
+SLEEP_BEFORE_CLICK = 1.0  # 找到圖後點擊前等待
+HUMAN_PRESS_MIN = 0.1     # 最小按壓（秒）
+HUMAN_PRESS_MAX = 0.3     # 最大按壓（秒）
+
+TWO_FA_BUG = True
+RETRY_LAST_LOC_CLICK = True  # <--- 沒找到圖時是否點擊上一個步驟找到圖的座標，預設開啟
+
 pyautogui.FAILSAFE = False
 running = True
 paused = False
 wait_for_start = False
+
+last_global_loc = None  # 全域記錄最近一次成功找到圖的滑鼠座標
 
 def monitor_keys():
     global running, paused, wait_for_start
@@ -86,7 +96,7 @@ def monitor_keys():
             if key.char == KEY_EXIT:
                 print(f"偵測到 {KEY_EXIT}，全部腳本結束")
                 running = False
-                return False
+                os._exit(0)
             elif key.char == KEY_PAUSE:
                 paused = not paused
                 if paused:
@@ -98,8 +108,8 @@ def monitor_keys():
                 print(f"[RESUME] 收到 {KEY_START}，繼續下一輪找王")
         except AttributeError:
             pass
-    with keyboard.Listener(on_press=on_press) as listener:
-        listener.join()
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
 
 def wait_start_key():
     print(f"請按 {KEY_START} 開始自動找王")
@@ -124,79 +134,131 @@ def wait_for_start_key():
     while wait_for_start and running:
         time.sleep(0.1)
 
-def detect_and_click(png, speed=None):
-    global running
-    if speed is None:
-        speed = random.uniform(0.3, 0.5)
-    pyautogui.moveTo(
-        random.randint(MOVE_RANDOM_X[0], MOVE_RANDOM_X[1]),
-        random.randint(MOVE_RANDOM_Y[0], MOVE_RANDOM_Y[1]),
-        MOVE_TO_DELAY,
-        pyautogui.easeOutQuad
-    )
-    print('尋找圖片:', png)
-    start_time = time.time()
-    while running:
-        try:
-            location = pyautogui.locateOnScreen(png, confidence=0.8)
-        except Exception as e:
-            print(f"找圖時異常: {e}")
-            location = None
-        if location is not None:
-            break
-        else:
-            if 'timeout' in png:
+def safe_locate(path, confidence=0.8):
+    try:
+        return pyautogui.locateOnScreen(path, confidence=confidence)
+    except pyautogui.ImageNotFoundException:
+        return None
+    except Exception as e:
+        print(f"[ERROR] {path} 找圖時異常: {e}")
+        return None
+
+def human_click(x, y):
+    # numpy int -> python int
+    x = int(x)
+    y = int(y)
+    pyautogui.moveTo(x, y, random.uniform(0.15, 0.3), pyautogui.easeInElastic)
+    pyautogui.mouseDown()
+    time.sleep(random.uniform(HUMAN_PRESS_MIN, HUMAN_PRESS_MAX))
+    pyautogui.mouseUp()
+
+def patch_2fa_reload():
+    for action_img in ["menu.png", "reload.png", "yes.png"]:
+        img_path = f"{PATH_IMG}/{action_img}"
+        print(f"[2FA BUG] 點擊 {action_img}")
+        location = None
+        for _ in range(10):
+            if not running:
                 return
-            time.sleep(1)
-            now = time.time()
-            if now - start_time > 1:
-                if 'confirm' in png:
-                    detect_and_click(f"{PATH_IMG}/confirm_timeout.png")
-                elif 'login' in png:
-                    detect_and_click(f"{PATH_IMG}/login_timeout.png")
-                elif 'choosing' in png:
-                    detect_and_click(f"{PATH_IMG}/choosing_timeout.png")
-    if location is None:
-        print(f"[WARN] {png} 找不到圖，跳過此步驟")
-        return
-    point = pyautogui.center(location)
-    x = int(point.x + random.uniform(-MOVE_CLICK_RANDOM_OFFSET, MOVE_CLICK_RANDOM_OFFSET))
-    y = int(point.y + random.uniform(-MOVE_CLICK_RANDOM_OFFSET, MOVE_CLICK_RANDOM_OFFSET))
-    pyautogui.moveTo(x, y, speed, pyautogui.easeInElastic)
-    if 'login' in png:
-        time.sleep(3)
-        pyautogui.click()
-    time.sleep(random.uniform(0.05, 0.1))
-    if 'freemarket' in png or 'login' in png:
-        pyautogui.click(clicks=2, interval=0.1)
-    else:
-        pyautogui.click()
-    time.sleep(random.uniform(0.1, 0.2))
-    if 'login' in png:
-        pyautogui.click()
+            location = safe_locate(img_path, confidence=0.8)
+            if location:
+                x, y = pyautogui.center(location)
+                human_click(x, y)
+                time.sleep(0.5)
+                break
+            time.sleep(0.5)
+        if not location:
+            print(f"[2FA BUG] {action_img} 找不到，跳過此步")
+
+def find_and_click_with_retry(img_path, stage_name, timeout, is_login=False):
+    global last_global_loc, running, paused
+    t0 = time.time()
+    retry = 0
+    fa2_count = 0
+    last_loc = None
+    while running:
+        if paused:
+            print(f"[PAUSE] 已暫停在 {stage_name}，等待恢復 ...")
+            while paused and running:
+                time.sleep(0.3)
+            # 恢復後繼續 while，不reset timer
+        if time.time() - t0 > timeout:
+            print(f"[TIMEOUT] {stage_name} 階段等待超過 {timeout} 秒，結束程式！")
+            os._exit(1)
+        time.sleep(SLEEP_BEFORE_FIND)
+        if not running:
+            break
+        if is_login and TWO_FA_BUG:
+            fa2_path = f"{PATH_IMG}/2fa.png"
+            fa2_loc = safe_locate(fa2_path, confidence=0.8)
+            if fa2_loc:
+                print(f"[{stage_name}] 發現2fa.png，執行2FA補丁（login重試計數歸零）")
+                patch_2fa_reload()
+                fa2_count += 1
+                t0 = time.time()
+                retry = 0
+                last_loc = None
+                continue
+        loc = safe_locate(img_path, confidence=0.8)
+        if loc:
+            print(f"[{stage_name}] 找到 {img_path}，第{retry+1}次嘗試")
+            time.sleep(SLEEP_BEFORE_CLICK)
+            x, y = pyautogui.center(loc)
+            human_click(x, y)
+            time.sleep(1.0)
+            last_global_loc = (x, y)
+            last_loc = (x, y)
+            return True, retry, fa2_count
+        else:
+            retry += 1
+            if RETRY_LAST_LOC_CLICK and last_global_loc is not None:
+                print(f"[{stage_name}] 沒找到 {img_path}，重試第{retry}次，點擊上個成功座標 {last_global_loc}")
+                x, y = last_global_loc
+                human_click(x, y)
+                time.sleep(0.5)
+            else:
+                print(f"[{stage_name}] 沒找到 {img_path}，重試第{retry}次，無可點擊座標略過")
+        if loc:
+            last_loc = pyautogui.center(loc)
+    return False, retry, fa2_count
 
 def auto_finder():
     global running, paused
+    switch_count = 0
+    fa2_total = 0
     while running:
         if paused:
             print(f"[PAUSE] 自動找王已暫停，等待恢復 ...")
         while paused and running:
             time.sleep(0.3)
+        fa2_round = 0
         for target in DETECT_TARGETS:
-            if not running: return
+            if not running:
+                return
             if paused: break
-            detect_and_click(target)
-            if not running: return
-            if 'choosing' in target:
-                boss_name = confirm_boss()
-                if boss_name:
-                    channel_text = capture_and_send_channel_info(boss_name)
-                    if SEND_CHANNEL_TEXT:
-                        msg = f"頻道{channel_text} 找到 {boss_name}！"
-                        send_discord_text(msg)
-                    post_notify_action()
-                    if not AUTO_CONTINUE_AFTER_NOTIFY:
-                        wait_for_start_key()
+            step = target.split('/')[-1].replace('.png', '').upper()
+            if "login.png" in target:
+                result, retry, fa2_count = find_and_click_with_retry(target, "LOGIN", STAGE_TIMEOUT, is_login=True)
+                fa2_round = fa2_count
+                fa2_total += fa2_count
+                continue
+            result, retry, _ = find_and_click_with_retry(target, step, STAGE_TIMEOUT, is_login=False)
+            if "random_change.png" in target:
+                switch_count += 1
+        boss_name = confirm_boss()
+        if boss_name:
+            channel_text = capture_and_send_channel_info(boss_name)
+            if SEND_CHANNEL_TEXT:
+                msg = f"頻道{channel_text} 找到 {boss_name}！"
+                send_discord_text(msg)
+            post_notify_action()
+            print(f"\n[統計] 這次換了 {switch_count} 次頻道（不含2FA）。")
+            if fa2_round > 0:
+                print(f"[統計] 這輪遇到 2FA BUG 補丁 {fa2_round} 次，總累積 {fa2_total} 次。")
+            if not AUTO_CONTINUE_AFTER_NOTIFY:
+                wait_for_start_key()
+            switch_count = 0
+            fa2_round = 0
 
 def send_discord_image(img_path, msg="頻道資訊截圖"):
     with open(img_path, "rb") as f:
@@ -229,9 +291,9 @@ def ocr_channel_img(img):
         return "?"
 
 def capture_and_send_channel_info(boss_name):
-    detect_and_click(f"{PATH_IMG}/catalog.png")
+    find_and_click_with_retry(f"{PATH_IMG}/catalog.png", "CATALOG", STAGE_TIMEOUT)
     time.sleep(CATALOG_CLICK_DELAY)
-    detect_and_click(f"{PATH_IMG}/channel.png")
+    find_and_click_with_retry(f"{PATH_IMG}/channel.png", "CHANNEL", STAGE_TIMEOUT)
     time.sleep(CHANNEL_CLICK_DELAY)
     os.makedirs(CHANNEL_CAPTURE_DIR, exist_ok=True)
     fname = f"{CHANNEL_CAPTURE_DIR}/channel_{int(time.time()*1000)}.png"
@@ -261,7 +323,6 @@ def confirm_boss(timeout_seconds=OCR_TIMEOUT):
     found_event = threading.Event()
     bbox = OCR_BBOX.copy()
     found_boss_name = [None]
-
     def capture_loop():
         with mss.mss() as sct:
             while not found_event.is_set() and stats['count'] < queue_size:
@@ -281,7 +342,6 @@ def confirm_boss(timeout_seconds=OCR_TIMEOUT):
                 print(time.time(), '截圖')
                 stats['count'] += 1
         img_queue.put(None)
-
     def ocr_loop():
         while True:
             item = img_queue.get()
@@ -299,7 +359,6 @@ def confirm_boss(timeout_seconds=OCR_TIMEOUT):
                             return
             img_queue.task_done()
             print(time.strftime('%H:%M:%S'), 'OCR處理完成')
-
     t1 = threading.Thread(target=capture_loop, daemon=True)
     t2 = threading.Thread(target=ocr_loop, daemon=True)
     t1.start()
@@ -312,6 +371,6 @@ def confirm_boss(timeout_seconds=OCR_TIMEOUT):
 
 if __name__ == '__main__':
     wait_start_key()
-    threading.Thread(target=monitor_keys, daemon=True).start()
+    monitor_keys()
     auto_finder()
     print("程式結束")

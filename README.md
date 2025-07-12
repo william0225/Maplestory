@@ -87,3 +87,27 @@ bash
 複製
 編輯
 git commit -m "find boss first version"
+
+步驟 1：安裝 Tesseract-OCR 主程式（不是 Python package！）
+下載 Windows 安裝程式：官方 Windows 版本下載點（GitHub Releases）
+
+下載例如「tesseract-ocr-setup-5.3.4.20240109.exe」或最新安裝包。
+
+直接執行安裝，建議路徑：
+
+makefile
+複製
+編輯
+C:\Program Files\Tesseract-OCR\
+安裝時勾選「Add to PATH」選項（這樣 python 就能直接找到執行檔）。
+
+步驟 2（可選）：如果你沒加到 PATH
+可以在程式開頭加一行指定路徑，例如：
+
+python
+複製
+編輯
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+請確認 tesseract.exe 真的在這個路徑，否則請改成你安裝的實際路徑。
+
