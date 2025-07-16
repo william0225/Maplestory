@@ -2,6 +2,8 @@
 Python Script
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
 pip install -r requirements.txt
 
 # 忽略 Python venv 及常見暫存
