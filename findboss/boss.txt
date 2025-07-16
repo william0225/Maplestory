@@ -1,123 +1,292 @@
-【boss.py 自動找王腳本說明】
-一、用途說明
-本腳本設計用於自動在遊戲內換頻、辨識公告畫面，偵測特定 BOSS 是否出現，
-並自動發送通知到 Discord。可同步擷取頻道資訊，並支援自動暫停、恢復、停止及自動按鍵動作。
+import sys
+import os
+import time
+import threading
+import mss
+from PIL import Image
+import cv2
+import numpy as np
+import pytesseract
+import pyautogui
+import random
+import re
+from pynput import keyboard
 
-二、主要功能
-自動化找王流程
+# === 全域參數/開關 ===
+MODE = "all"    # "all":補血/移動/buff  "buff":只buff
 
-依序自動點擊「換頻」、「確認」等按鈕，自動換頻。
+# 補血行為
+HEAL_KEY = 'ctrl'
+HEAL_HOLD_MIN = 3.0      # 每次補血長按最短秒
+HEAL_HOLD_MAX = 5.0      # 最長秒
+HEAL_HOLD_CHECK = 0.12   # 補血期間偵測間隔（越低越即時）
 
-每輪自動辨識是否有 BOSS 公告/畫面。
+# 補血時瞬移
+HEAL_MOVE_INTERVAL_MIN = 0.4
+HEAL_MOVE_INTERVAL_MAX = 1.1
+HEAL_MOVE_CHANCE = 0.30
 
-BOSS 關鍵字辨識（OCR）
+# 模擬真人按鍵
+KEY_HOLD_MIN = 0.10      # 每個按鍵最短hold秒
+KEY_HOLD_MAX = 0.25      # 最長hold秒
 
-支援多組 Boss 關鍵字（如「大菇菇」、「書生」、「樹妖王」等），可自行擴充。
+# OCR/血量監控
+REGION_HP = {'top': 1050, 'left': 670, 'width': 65, 'height': 22}  # 你自己根據新血量區調整
+OCR_INTERVAL = 0.1
+SAVE_OCR_IMAGE = False
+OCR_SAVE_DIR = "debug/ocr"
 
-使用 RapidOCR 套件，指定畫面區域辨識遊戲公告/王名。
+# 移動
+MOVE_LEFT_KEY = "left"
+MOVE_RIGHT_KEY = "right"
+JUMP_KEY = "space"
 
-自動 Discord 通知
+# Idle/警戒
+IDLE_TIME = 5.0
+GUARD_TIME = 1.0
+IDLE_MOVE_MIN = 0.12
+IDLE_MOVE_MAX = 0.25
+IDLE_MOVE_INTERVAL_MIN = 0.35
+IDLE_MOVE_INTERVAL_MAX = 0.8
 
-找到王自動推播 Discord（可發文字與/或頻道資訊圖片）。
+DEBUG = True
 
-頻道資訊擷取
+# 狀態
+NEED_HEAL = False
+CUR_HP = None
+MAX_HP = None
+running = True
+paused = False
+started = False
 
-自動點開 catalog & channel 畫面，截圖指定區域。
+# 路徑設定與匯入
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib')))
+import autobuff
 
-支援 OCR 讀取頻道號，自動發送頻道文字資訊至 Discord。
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-通知後自動操作
+# ==== Utils ====
+def log(msg):
+    if DEBUG:
+        print(msg)
 
-通知後自動延遲幾秒，幫你按指定鍵（如 esc），回到可操作狀態。
+def nowstr():
+    return time.strftime("[%Y-%m-%d %H:%M:%S]", time.localtime())
 
-智能自動換頻/手動續行
+def extract_hp(text):
+    """
+    只抓純 xxx/yyy 格式，數值合理才算血量。
+    """
+    max_valid = 9999    # 角色血量最大值（依自己角色調）
+    # 找所有像 1271/1271 這樣的格式
+    matches = re.findall(r'(\d{1,5})\s*/\s*(\d{1,5})', text)
+    candidates = []
+    for cur, total in matches:
+        cur = int(cur)
+        total = int(total)
+        if 0 < cur <= total <= max_valid:
+            candidates.append((cur, total))
+    if candidates:
+        best = max(candidates, key=lambda x: x[1])
+        return best
+    print(f"[WARN] 血量辨識失敗，OCR內容='{text.strip()}'")
+    return None, None
 
-可選擇找到王後自動繼續換頻找王，或停下來等你按 n 再繼續。
+def pre_process(pil_img):
+    img = np.array(pil_img)
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    scale = 3
+    gray = cv2.resize(gray, (gray.shape[1]*scale, gray.shape[0]*scale), interpolation=cv2.INTER_CUBIC)
+    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return th
 
-隨時暫停/繼續/停止
+def key_press(key, hold_min=KEY_HOLD_MIN, hold_max=KEY_HOLD_MAX):
+    hold = random.uniform(hold_min, hold_max)
+    pyautogui.keyDown(key)
+    time.sleep(hold)
+    pyautogui.keyUp(key)
+    log(f"[KEY] 按下 {key} 持續 {hold:.2f}s")
 
-p 可暫停/恢復，q 可隨時結束。
+def key_combo(keys, hold_min=KEY_HOLD_MIN, hold_max=KEY_HOLD_MAX):
+    hold = random.uniform(hold_min, hold_max)
+    for k in keys:
+        pyautogui.keyDown(k)
+    time.sleep(hold)
+    for k in keys:
+        pyautogui.keyUp(k)
+    log(f"[KEY] 按下 {'+'.join(keys)} 持續 {hold:.2f}s")
 
-三、使用方式
-1. 前置作業
-需安裝必要套件：pyautogui, pynput, mss, Pillow, rapidocr, requests
+# ==== OCR Thread ====
+def ocr_hp():
+    with mss.mss() as sct:
+        shot = sct.grab(REGION_HP)
+        img = Image.frombytes('RGB', shot.size, shot.rgb)
+    if SAVE_OCR_IMAGE:
+        os.makedirs(OCR_SAVE_DIR, exist_ok=True)
+        fname = f"{OCR_SAVE_DIR}/hp_{int(time.time()*1000)}.png"
+        img.save(fname)
+        log(f"[OCR] 已存圖：{fname}")
+    proc = pre_process(img)
+    custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789/'   # 只允許數字與斜線
+    ocr_txt = pytesseract.image_to_string(proc, config=custom_config)
+    hp, max_hp = extract_hp(ocr_txt)
+    log(f"[OCR] OCR結果: '{ocr_txt.strip()}', 解析血量：{hp} / {max_hp}")
+    return hp, max_hp
 
-遊戲畫面解析度、UI 位置需與參數設定對應。
+def ocr_monitor():
+    global NEED_HEAL, CUR_HP, MAX_HP, running
+    log("[THREAD] 啟動 OCR 監測 thread")
+    while running:
+        hp, max_hp = ocr_hp()
+        CUR_HP, MAX_HP = hp, max_hp
+        NEED_HEAL = (hp is not None and max_hp is not None and hp < max_hp)
+        time.sleep(OCR_INTERVAL)
 
-2. 參數調整（檔案最上方）
-BOSS_NAMES：王名關鍵字（可改、增）
+# ==== 鍵盤監控 ====
+def monitor_keys():
+    global running, started, paused
+    def on_press(key):
+        global running, started, paused
+        try:
+            if key.char == 'q':
+                print("[EXIT] 偵測到 q，程式結束")
+                running = False
+                return False
+            elif key.char == 'r' and not started:
+                print("[START] 偵測到 r，開始執行")
+                started = True
+            elif key.char == 'p':
+                paused = not paused
+                print("[PAUSE]" if paused else "[RESUME]")
+        except AttributeError:
+            pass
+    print("[KEY] 啟動鍵盤監聽 thread")
+    with keyboard.Listener(on_press=on_press) as listener:
+        listener.join()
 
-WEBHOOK_URL：Discord webhook
+# ==== 主補血循環 ====
+def random_instant_move():
+    move_key = random.choice([MOVE_LEFT_KEY, MOVE_RIGHT_KEY])
+    log(f"[HEAL-MOVE] 執行瞬移: {move_key}+{JUMP_KEY}")
+    pyautogui.keyDown(move_key)
+    time.sleep(random.uniform(KEY_HOLD_MIN, KEY_HOLD_MAX))
+    pyautogui.keyDown(JUMP_KEY)
+    time.sleep(random.uniform(KEY_HOLD_MIN, KEY_HOLD_MAX))
+    pyautogui.keyUp(move_key)
+    pyautogui.keyUp(JUMP_KEY)
+    log(f"[HEAL-MOVE] 補血時瞬移 {move_key}+{JUMP_KEY}")
 
-CHANNEL_CAPTURE_REGION：頻道資訊截圖區域（根據遊戲畫面自行調整）
+def heal_press_and_move():
+    global NEED_HEAL, CUR_HP, MAX_HP, running
+    hold_time = random.uniform(HEAL_HOLD_MIN, HEAL_HOLD_MAX)
+    log(f"[HEAL] 長按補血鍵 {HEAL_KEY} 預計 {hold_time:.2f}s")
+    pyautogui.keyDown(HEAL_KEY)
+    start_time = time.time()
+    next_move = start_time + random.uniform(HEAL_MOVE_INTERVAL_MIN, HEAL_MOVE_INTERVAL_MAX)
+    try:
+        while running and NEED_HEAL:
+            now = time.time()
+            if CUR_HP is not None and MAX_HP is not None and CUR_HP >= MAX_HP:
+                log("[HEAL] 血補滿即放開")
+                break
+            if now - start_time >= hold_time:
+                log("[HEAL] 補血hold時間到")
+                break
+            if now >= next_move and random.random() < HEAL_MOVE_CHANCE:
+                random_instant_move()
+                next_move = now + random.uniform(HEAL_MOVE_INTERVAL_MIN, HEAL_MOVE_INTERVAL_MAX)
+            time.sleep(HEAL_HOLD_CHECK)
+    finally:
+        pyautogui.keyUp(HEAL_KEY)
+        log(f"[HEAL] 放開補血鍵 {HEAL_KEY}")
 
-POST_NOTIFY_WAIT：通知後延遲幾秒再自動按鍵
+# ==== 主流程 ====
+def main_behavior():
+    global running, started, paused, NEED_HEAL, CUR_HP, MAX_HP
+    print("等待 r 開始，q 結束，p 暫停/繼續")
+    while running and not started:
+        time.sleep(0.05)
+    print("[MAIN] 進入主行為迴圈")
+    in_guard_mode = False
+    in_idle_mode = False
 
-POST_NOTIFY_KEY：自動按哪個鍵（如 'esc'、'space'）
+    while running:
+        if paused:
+            time.sleep(0.05)
+            continue
+        if NEED_HEAL:
+            log(f"{nowstr()} [INFO] 進入補血循環")
+            while NEED_HEAL and running:
+                heal_press_and_move()
+                time.sleep(0.02)
+            log(f"{nowstr()} [INFO] 補血結束，進入警戒")
+            in_guard_mode = True
+            in_idle_mode = False
+            continue
+        if in_guard_mode:
+            log(f"{nowstr()} [GUARD] 警戒 {GUARD_TIME}s")
+            t0 = time.time()
+            while time.time() - t0 < GUARD_TIME and running:
+                if NEED_HEAL:
+                    in_guard_mode = False
+                    break
+                time.sleep(0.04)
+            else:
+                log(f"{nowstr()} [IDLE] 警戒結束，進入空閒")
+                in_guard_mode = False
+                in_idle_mode = True
+            continue
+        if in_idle_mode:
+            log(f"{nowstr()} [IDLE] idle狀態 buff+移動")
+            buff_result = autobuff.check_and_buff(
+                should_interrupt=lambda: NEED_HEAL,
+                interruptible_sleep=lambda t, c, s: not NEED_HEAL
+            )
+            if buff_result is False:
+                in_idle_mode = False
+                continue
+            elif buff_result is True:
+                t0 = time.time()
+                while time.time() - t0 < 1.2:
+                    if NEED_HEAL:
+                        in_idle_mode = False
+                        break
+                    time.sleep(0.05)
+                continue
+            interval = random.uniform(IDLE_MOVE_INTERVAL_MIN, IDLE_MOVE_INTERVAL_MAX)
+            t1 = time.time()
+            while time.time() - t1 < interval:
+                if NEED_HEAL:
+                    in_idle_mode = False
+                    break
+                time.sleep(0.05)
+            continue
+        time.sleep(0.04)
 
-AUTO_CONTINUE_AFTER_NOTIFY：True=自動換頻繼續；False=等你再按 n
+def autobuff_only():
+    global started, running
+    BUFF_INTERVAL_SEC = autobuff.BUFF_INTERVAL_SEC
+    print("只執行自動 Buff，按 r 開始，q 結束")
+    while running and not started:
+        time.sleep(0.05)
+    last_time = 0
+    while running:
+        now = time.time()
+        if now - last_time > BUFF_INTERVAL_SEC:
+            autobuff.do_buff()
+            autobuff.buff_move_preset()
+            last_time = now
+        for _ in range(50):
+            if not running:
+                break
+            time.sleep(0.1)
 
-SEND_CHANNEL_IMAGE/SEND_CHANNEL_TEXT：決定是否發送圖片、文字到 Discord
-
-其他細部參數（換頻按鈕位置、OCR 區域…）都可以最上方直接調整
-
-3. 操作流程
-執行：
-
-nginx
-複製
-編輯
-python boss.py
-首次啟動請按 n
-→ 腳本開始自動換頻找王
-
-找到王後：
-
-根據 AUTO_CONTINUE_AFTER_NOTIFY 參數，會自動繼續，或等你再按 n 續行
-
-通知會自動發送到 Discord（圖片/文字看你參數開關）
-
-頻道資訊也會一併發送（截圖/OCR）
-
-通知後延遲數秒自動按下你設定的按鍵（如 esc）
-
-隨時可：
-
-按 p：暫停/恢復
-
-按 q：結束腳本
-
-四、常見調整與排除問題
-視覺範圍沒偵測到王/頻道號：請檢查 OCR/截圖區域座標設定
-
-Discord 無通知：請檢查 webhook 是否正確
-
-遊戲解析度不同：務必調整各區域座標參數
-
-換頻按鈕等圖片找不到：檢查圖檔路徑及檔名、解析度是否相符
-
-五、全域熱鍵一覽
-鍵位	作用
-n	啟動/續行
-q	隨時結束腳本
-p	隨時暫停/恢復
-
-六、檔案結構建議
-boss.py（主程式）
-
-target/xxx.png（自動點擊要用到的圖片模板，依需求放）
-
-debug/ocr/（OCR 圖片存檔）
-
-debug/channel_info/（頻道資訊截圖存檔）
-
-七、維護建議
-遊戲改版或 UI 調整時，優先檢查參數座標、按鈕圖片。
-
-webhook 換新頻道需重新複製填入
-
-建議每次升級或移植都先手動測一次每個步驟
-
-有特殊需求隨時調整最上方參數區即可
-
-
+if __name__ == "__main__":
+    threading.Thread(target=monitor_keys, daemon=True).start()
+    if MODE == "all":
+        threading.Thread(target=ocr_monitor, daemon=True).start()
+        main_behavior()
+    elif MODE == "buff":
+        autobuff_only()
+    else:
+        print("MODE 設定錯誤，請選擇 'all' 或 'buff'")

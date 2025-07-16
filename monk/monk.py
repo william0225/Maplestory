@@ -1,65 +1,67 @@
-import sys
-import os
-import time
-import threading
+import sys, os, time, threading, random, re
 import mss
 from PIL import Image
 import cv2
 import numpy as np
 import pytesseract
 import pyautogui
-import random
-import re
 from pynput import keyboard
 
 # 動態匯入上層 lib
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib')))
 import autobuff
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# ========== 模式選擇 ==========
+MODE = "all"   # all=補血/移動/buff全功能，buff=只自動buff
 
-# ====== 全域參數 ======
-REGION_HP = {'top': 1070, 'left': 508, 'width': 154, 'height': 23}
-SAVE_OCR_IMAGE = False
-OCR_INTERVAL = 0.2
+# ========== 參數區 ==========
+REGION_HP = {'top': 1060, 'left': 560, 'width': 92, 'height': 24}
+OCR_INTERVAL = 0.1
+IDLE_TIME = 10.0
+GUARD_TIME = 2.0
+
 HEAL_KEY = 'ctrl'
-HEAL_KEY_HOLD_MIN = 0.10
-HEAL_KEY_HOLD_MAX = 0.20
-HEAL_INTERVAL_MIN = 0.10
-HEAL_INTERVAL_MAX = 0.20
-IDLE_TIME = 5.0
-GUARD_TIME = 1.0
-HEAL_STOP_WHEN_FULL = False
-
+HEAL_KEY_HOLD_MIN = 3.0
+HEAL_KEY_HOLD_MAX = 5.0
+HEAL_MOVE_CHANCE = 0.3
 MOVE_LEFT_KEY = "left"
 MOVE_RIGHT_KEY = "right"
-IDLE_MOVE_MIN = 0.2
-IDLE_MOVE_MAX = 0.4
-IDLE_MOVE_INTERVAL_MIN = 0.8
-IDLE_MOVE_INTERVAL_MAX = 1.5
+JUMP_KEY = "space"
 
+# ========== 日志設定 ==========
+LOG_DIR = os.path.join(os.path.dirname(__file__), 'debug')
+LOG_FILE = os.path.join(LOG_DIR, 'log.txt')
+if os.path.exists(LOG_FILE):
+    os.remove(LOG_FILE)
+os.makedirs(LOG_DIR, exist_ok=True)
+def log_mon(msg):
+    ts = time.strftime('[%Y-%m-%d %H:%M:%S]')
+    line = f"{ts} [monk] {msg}"
+    print(line)
+    with open(LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(line + '\n')
+
+# ========== 全域狀態 ==========
+NEED_HEAL = False
+CUR_HP = None
+MAX_HP = None
 running = True
 paused = False
 started = False
 
 def nowstr():
-    return time.strftime("[%Y-%m-%d %H:%M:%S]", time.localtime())
+    return time.strftime('[%Y-%m-%d %H:%M:%S]')
 
 def extract_hp(text):
-    match = re.search(r'HP\[(\d+)\s*/\s*(\d+)\]', text, re.IGNORECASE)
-    if not match:
-        match = re.search(r'(\d+)\s*/\s*(\d+)', text)
-    if match:
-        current = int(match.group(1))
-        total = int(match.group(2))
-        return current, total
+    m = re.search(r'(\d+)\s*/\s*(\d+)', text)
+    if m:
+        return int(m.group(1)), int(m.group(2))
     return None, None
 
-def pre_process(pil_img):
-    img = np.array(pil_img)
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    scale = 3
-    gray = cv2.resize(gray, (gray.shape[1]*scale, gray.shape[0]*scale), interpolation=cv2.INTER_CUBIC)
+def pre_process(img_pil):
+    arr = np.array(img_pil)
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    gray = cv2.resize(gray, (gray.shape[1]*3, gray.shape[0]*3), interpolation=cv2.INTER_CUBIC)
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return th
 
@@ -69,20 +71,18 @@ def monitor_keys():
         global running, started, paused
         try:
             if key.char == 'q':
-                print("[EXIT] 偵測到 q，程式結束")
+                log_mon("偵測到 q，程式結束")
                 running = False
                 return False
             elif key.char == 'r' and not started:
-                print("[START] 偵測到 r，開始自動補血")
+                log_mon("偵測到 r，開始")
                 started = True
             elif key.char == 'p':
                 paused = not paused
-                if paused:
-                    print("[PAUSE] 已暫停，按 p 恢復")
-                else:
-                    print("[RESUME] 已恢復")
-        except AttributeError:
+                log_mon("已暫停" if paused else "已恢復")
+        except:
             pass
+    log_mon("啟動鍵盤監聽")
     with keyboard.Listener(on_press=on_press) as listener:
         listener.join()
 
@@ -91,134 +91,112 @@ def ocr_hp():
         shot = sct.grab(REGION_HP)
         img = Image.frombytes('RGB', shot.size, shot.rgb)
     proc = pre_process(img)
-    custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=HP0123456789[]/'
-    ocr_txt = pytesseract.image_to_string(proc, config=custom_config)
-    hp, max_hp = extract_hp(ocr_txt)
-    return hp, max_hp
+    cfg = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789/'
+    txt = pytesseract.image_to_string(proc, config=cfg).strip()
+    hp, mh = extract_hp(txt)
+    return hp, mh, txt
+
+def ocr_monitor():
+    global NEED_HEAL, CUR_HP, MAX_HP, running
+    log_mon("啟動 OCR 監測")
+    last_hit = None
+    while running:
+        hp, mh, txt = ocr_hp()
+        CUR_HP, MAX_HP = hp, mh
+        if hp is not None:
+            if hp < mh:
+                NEED_HEAL = True
+                last_hit = time.time()
+                log_mon(f"OCR='{hp}/{mh}' => NEED_HEAL=True")
+            else:
+                if last_hit and time.time() - last_hit > IDLE_TIME:
+                    NEED_HEAL = False
+                log_mon(f"OCR='{hp}/{mh}' => NEED_HEAL={NEED_HEAL}")
+        else:
+            log_mon(f"OCR失敗 txt='{txt}'")
+        time.sleep(OCR_INTERVAL)
 
 def heal_action():
-    hold_time = random.uniform(HEAL_KEY_HOLD_MIN, HEAL_KEY_HOLD_MAX)
+    log_mon(f"[HEAL] 長按 {HEAL_KEY}")
     pyautogui.keyDown(HEAL_KEY)
-    time.sleep(hold_time)
+    hold = random.uniform(HEAL_KEY_HOLD_MIN, HEAL_KEY_HOLD_MAX)
+    time.sleep(hold)
     pyautogui.keyUp(HEAL_KEY)
-    print(f"{nowstr()} [HEAL] 按下 {HEAL_KEY}，hold {hold_time:.2f}s")
+    log_mon(f"[HEAL] 補血持續 {hold:.2f}s")
+    if random.random() < HEAL_MOVE_CHANCE:
+        d = random.uniform(0.1, 0.2)
+        time.sleep(d)
+        mk = random.choice([MOVE_LEFT_KEY, MOVE_RIGHT_KEY])
+        pyautogui.keyDown(mk); pyautogui.keyDown(JUMP_KEY)
+        time.sleep(random.uniform(0.05,0.1))
+        pyautogui.keyUp(mk); pyautogui.keyUp(JUMP_KEY)
+        log_mon(f"[HEAL] 瞬移 {mk}+{JUMP_KEY}")
 
-def idle_move_action(should_interrupt):
-    key = random.choice([MOVE_LEFT_KEY, MOVE_RIGHT_KEY])
-    hold_time = random.uniform(IDLE_MOVE_MIN, IDLE_MOVE_MAX)
-    pyautogui.keyDown(key)
-    t_start = time.time()
-    while time.time() - t_start < hold_time:
-        if should_interrupt():
-            pyautogui.keyUp(key)
-            print(f"{nowstr()} [IDLE-MOVE] 移動中被扣血，恢復補血")
-            return False
-        time.sleep(0.1)
-    pyautogui.keyUp(key)
-    print(f"{nowstr()} [IDLE-MOVE] 移動 {key}，hold {hold_time:.2f}s")
-    return True
-
-def should_interrupt():
-    hp, max_hp = ocr_hp()
-    return hp is not None and max_hp is not None and hp < max_hp
-
-def main_loop():
-    global running, started, paused
-    print("等待 r 開始，q 結束，p 暫停/繼續")
+def main_behavior():
+    global running, paused, NEED_HEAL
+    log_mon("等待 r 開始")
     while running and not started:
-        time.sleep(0.2)
-
-    last_damage_time = None
-    in_heal_mode = False
-    in_guard_mode = False
-    in_idle_mode = False
+        time.sleep(0.05)
+    log_mon("進入主迴圈")
+    in_guard = False
 
     while running:
         if paused:
-            time.sleep(0.2)
+            time.sleep(0.1)
             continue
-
-        hp, max_hp = ocr_hp()
-        now = time.time()
-        if hp is not None and max_hp is not None:
-            print(f"{nowstr()} 偵測血量：{hp}/{max_hp}")
-            # 一但被扣血就進補血
-            if hp < max_hp:
-                if not in_heal_mode:
-                    print(f"{nowstr()} [INFO] 偵測到被扣血，開始自動補血")
-                    in_heal_mode = True
-                    in_guard_mode = False
-                    in_idle_mode = False
-                last_damage_time = now
-
-            if in_heal_mode:
+        if NEED_HEAL:
+            log_mon("被打，立即補血")
+            while NEED_HEAL and running:
                 heal_action()
-                time.sleep(random.uniform(HEAL_INTERVAL_MIN, HEAL_INTERVAL_MAX))
-                if last_damage_time is not None and (now - last_damage_time) >= IDLE_TIME:
-                    print(f"{nowstr()} [GUARD] 進入警戒模式 {GUARD_TIME}秒")
-                    in_heal_mode = False
-                    in_guard_mode = True
-                    guard_start_time = time.time()
-            elif in_guard_mode:
-                guard_ok = True
-                while time.time() - guard_start_time < GUARD_TIME and running:
-                    if should_interrupt():
-                        in_heal_mode = True
-                        in_guard_mode = False
-                        in_idle_mode = False
-                        last_damage_time = time.time()
-                        print(f"{nowstr()} [GUARD] 警戒期間被扣血，恢復補血")
-                        guard_ok = False
-                        break
-                    time.sleep(OCR_INTERVAL)
-                if guard_ok:
-                    print(f"{nowstr()} [IDLE] 警戒結束，進入空閒")
-                    in_guard_mode = False
-                    in_idle_mode = True
-            elif in_idle_mode:
-                # idle時，優先buff，buff時可被中斷
-                buff_result = autobuff.check_and_buff(should_interrupt=should_interrupt)
-                if buff_result is False:
-                    print(f"{nowstr()} [IDLE] Buff被打斷，立即進補血")
-                    in_idle_mode = False
-                    in_heal_mode = True
-                    last_damage_time = time.time()
-                    continue
-                elif buff_result is True:
-                    t0 = time.time()
-                    while time.time() - t0 < 2.0:
-                        if should_interrupt():
-                            print(f"{nowstr()} [IDLE] Buff結束後馬上被扣血，立即進補血")
-                            in_idle_mode = False
-                            in_heal_mode = True
-                            last_damage_time = time.time()
-                            break
-                        time.sleep(0.1)
-                    continue
-                # buff未到，執行移動，移動時隨時能中斷
-                move_ok = idle_move_action(should_interrupt)
-                if not move_ok:
-                    in_idle_mode = False
-                    in_heal_mode = True
-                    last_damage_time = time.time()
-                    continue
-                interval = random.uniform(IDLE_MOVE_INTERVAL_MIN, IDLE_MOVE_INTERVAL_MAX)
-                print(f"{nowstr()} [IDLE-MOVE] 等待 {interval:.2f}s 再移動")
-                t1 = time.time()
-                while time.time() - t1 < interval and running:
-                    if should_interrupt():
-                        print(f"{nowstr()} [IDLE-MOVE] 間隔中被扣血，恢復補血")
-                        in_idle_mode = False
-                        in_heal_mode = True
-                        last_damage_time = time.time()
-                        break
-                    time.sleep(0.1)
+                time.sleep(0.02)
+            log_mon("補血結束，進入警戒")
+            in_guard = True
+            continue
+        if in_guard:
+            log_mon(f"[GUARD] 警戒 {GUARD_TIME}s")
+            t0 = time.time()
+            while time.time() - t0 < GUARD_TIME and running:
+                if NEED_HEAL:
+                    log_mon("警戒期間被打，恢復補血")
+                    break
+                time.sleep(0.05)
             else:
-                time.sleep(OCR_INTERVAL)
-        else:
-            print(f"{nowstr()} [WARN] 血量辨識失敗")
-            time.sleep(OCR_INTERVAL)
+                log_mon("警戒結束，進入 idle")
+                autobuff_only = False
+            in_guard = False
+            continue
+        # idle 模式
+        log_mon("idle 模式，嘗試 Buff/移動")
+        res = autobuff.check_and_buff(lambda: NEED_HEAL, None)
+        if res is False:
+            log_mon("Buff 被打斷，回補血")
+            continue
+        # 若沒有 buff，或 buff 過後再進行簡易移動
+        mk = random.choice([MOVE_LEFT_KEY, MOVE_RIGHT_KEY])
+        hold = random.uniform(0.1, 0.2)
+        pyautogui.keyDown(mk); time.sleep(hold); pyautogui.keyUp(mk)
+        log_mon(f"[IDLE-MOVE] {mk} hold {hold:.2f}s")
+        time.sleep(random.uniform(0.5, 1.0))
+
+def autobuff_only():
+    global running, started
+    interval = autobuff.BUFF_INTERVAL_SEC
+    log_mon("只執行 autobuff 模式")
+    while running and not started:
+        time.sleep(0.05)
+    last = 0
+    while running:
+        now = time.time()
+        if now - last >= interval:
+            autobuff.do_buff()
+            autobuff.buff_move_preset()
+            last = now
+        time.sleep(0.1)
 
 if __name__ == "__main__":
     threading.Thread(target=monitor_keys, daemon=True).start()
-    main_loop()
+    if MODE == "all":
+        threading.Thread(target=ocr_monitor, daemon=True).start()
+        main_behavior()
+    else:
+        autobuff_only()

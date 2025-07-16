@@ -60,7 +60,9 @@ SAVE_OCR_IMG = False
 OCR_SAVE_DIR = "debug/ocr"
 
 CHANNEL_CAPTURE_DIR = "debug/channel_info"
-CHANNEL_CAPTURE_REGION = {'top': 270, 'left': 540, 'width': 160, 'height': 40}
+CHANNEL_CAPTURE_REGION_PC = {'top': 320, 'left': 770, 'width': 160, 'height': 40}
+CHANNEL_CAPTURE_REGION_NB = {'top': 270, 'left': 540, 'width': 160, 'height': 40}
+CHANNEL_CAPTURE_REGION = CHANNEL_CAPTURE_REGION_PC
 
 CATALOG_CLICK_DELAY = 0.5
 CHANNEL_CLICK_DELAY = 1.2
@@ -73,20 +75,20 @@ POST_NOTIFY_WAIT = 3
 POST_NOTIFY_KEY = 'esc'
 
 STAGE_TIMEOUT = 60
-SLEEP_BEFORE_FIND = 1.0   # 每輪找圖前等待
-SLEEP_BEFORE_CLICK = 1.0  # 找到圖後點擊前等待
-HUMAN_PRESS_MIN = 0.1     # 最小按壓（秒）
-HUMAN_PRESS_MAX = 0.3     # 最大按壓（秒）
+BLACKSCREEN_TIMEOUT = 25    # <--- 新增黑屏專用timeout (秒)
+SLEEP_BEFORE_FIND = 1.0
+SLEEP_BEFORE_CLICK = 1.0
+HUMAN_PRESS_MIN = 0.1
+HUMAN_PRESS_MAX = 0.3
 
 TWO_FA_BUG = True
-RETRY_LAST_LOC_CLICK = True  # <--- 沒找到圖時是否點擊上一個步驟找到圖的座標，預設開啟
+RETRY_LAST_LOC_CLICK = True
 
 pyautogui.FAILSAFE = False
 running = True
 paused = False
 wait_for_start = False
-
-last_global_loc = None  # 全域記錄最近一次成功找到圖的滑鼠座標
+last_global_loc = None
 
 def monitor_keys():
     global running, paused, wait_for_start
@@ -144,7 +146,6 @@ def safe_locate(path, confidence=0.8):
         return None
 
 def human_click(x, y):
-    # numpy int -> python int
     x = int(x)
     y = int(y)
     pyautogui.moveTo(x, y, random.uniform(0.15, 0.3), pyautogui.easeInElastic)
@@ -176,21 +177,41 @@ def find_and_click_with_retry(img_path, stage_name, timeout, is_login=False):
     retry = 0
     fa2_count = 0
     last_loc = None
+    blackscreen_t0 = None  # 黑屏補丁用計時器
+
     while running:
         if paused:
             print(f"[PAUSE] 已暫停在 {stage_name}，等待恢復 ...")
             while paused and running:
                 time.sleep(0.3)
-            # 恢復後繼續 while，不reset timer
         if time.time() - t0 > timeout:
             print(f"[TIMEOUT] {stage_name} 階段等待超過 {timeout} 秒，結束程式！")
             os._exit(1)
         time.sleep(SLEEP_BEFORE_FIND)
         if not running:
             break
+
+        # 新黑屏 timeout 補丁只作用於 login
         if is_login and TWO_FA_BUG:
             fa2_path = f"{PATH_IMG}/2fa.png"
             fa2_loc = safe_locate(fa2_path, confidence=0.8)
+            login_loc = safe_locate(img_path, confidence=0.8)
+            # login.png與2fa.png都沒找到
+            if fa2_loc is None and login_loc is None:
+                if blackscreen_t0 is None:
+                    blackscreen_t0 = time.time()
+                    print(f"[LOGIN] 進入黑屏疑似2FA計時 ...")
+                elif time.time() - blackscreen_t0 > BLACKSCREEN_TIMEOUT:
+                    print(f"[LOGIN] 黑屏專用Timeout達 {BLACKSCREEN_TIMEOUT} 秒，自動執行2FA補丁")
+                    patch_2fa_reload()
+                    fa2_count += 1
+                    t0 = time.time()
+                    retry = 0
+                    last_loc = None
+                    blackscreen_t0 = None
+                    continue
+            else:
+                blackscreen_t0 = None   # 有圖就 reset
             if fa2_loc:
                 print(f"[{stage_name}] 發現2fa.png，執行2FA補丁（login重試計數歸零）")
                 patch_2fa_reload()
@@ -198,7 +219,28 @@ def find_and_click_with_retry(img_path, stage_name, timeout, is_login=False):
                 t0 = time.time()
                 retry = 0
                 last_loc = None
+                blackscreen_t0 = None
                 continue
+            if login_loc:
+                print(f"[{stage_name}] 找到 {img_path}，第{retry+1}次嘗試")
+                time.sleep(SLEEP_BEFORE_CLICK)
+                x, y = pyautogui.center(login_loc)
+                human_click(x, y)
+                time.sleep(1.0)
+                last_global_loc = (x, y)
+                last_loc = (x, y)
+                return True, retry, fa2_count
+            # 兩張圖都沒找到才 fallback
+            retry += 1
+            if RETRY_LAST_LOC_CLICK and last_global_loc is not None:
+                print(f"[{stage_name}] 沒找到 {img_path}，重試第{retry}次，點擊上個成功座標 {last_global_loc}")
+                x, y = last_global_loc
+                human_click(x, y)
+                time.sleep(0.5)
+            else:
+                print(f"[{stage_name}] 沒找到 {img_path}，重試第{retry}次，無可點擊座標略過")
+            continue  # 注意，login時本輪處理到這就進下一輪
+        # 非login的舊邏輯（不動）
         loc = safe_locate(img_path, confidence=0.8)
         if loc:
             print(f"[{stage_name}] 找到 {img_path}，第{retry+1}次嘗試")
@@ -221,6 +263,8 @@ def find_and_click_with_retry(img_path, stage_name, timeout, is_login=False):
         if loc:
             last_loc = pyautogui.center(loc)
     return False, retry, fa2_count
+
+# auto_finder, capture_and_send_channel_info, post_notify_action, confirm_boss...（以下同你現有的）
 
 def auto_finder():
     global running, paused

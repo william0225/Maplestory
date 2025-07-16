@@ -1,0 +1,111 @@
+Maplestory 自動化腳本專案手冊 manual.txt
+
+目錄結構
+
+Maplestory/ │ ├─ findboss/ │ └─ boss.py │ ├─ lib/ │ └─ autobuff.py │ ├─ monk/ │ └─ monk.py │ └─ tool/ ├─ auto_buff_test.py └─ show_coord.py
+
+各檔案功能總覽
+
+findboss/boss.py
+
+功能：自動尋找 MapleStory Boss。支援自動換頻、辨識 Boss 名稱、Discord 通知、Debug 圖像存檔。
+
+lib/autobuff.py
+
+功能：通用自動 buff 技能 library。供 monk.py、auto_buff_test.py 等調用。
+
+monk/monk.py
+
+功能：僧侶職業自動補血打怪腳本（all模式/only buff模式）。
+
+主要行為邏輯：
+
+啟動：按 r 開始，q 結束，p 暫停/恢復。
+
+OCR 血量檢測：每 0.1 秒截圖 REGION_HP，解析 當前血量/最大血量，一旦血量 < 最大，立即進入補血狀態。
+
+補血機制：
+
+連續長按：按住補血鍵（預設 ctrl）持續 3~5 秒；若期間偵測到血量 < 滿血，則立即重複長按循環。
+
+閃避動作：補血期間以 HEAL_MOVE_CHANCE 機率觸發瞬移（MOVE_LEFT_KEY/MOVE_RIGHT_KEY + JUMP_KEY 隨機），持續 0.05~0.1 秒。
+
+警戒階段：補血長按結束後，進入 GUARD_TIME 秒的警戒；警戒期間若血量再次減少，立刻回補血。
+
+空閒階段 (idle)：警戒結束，自動進入 idle。idle 階段優先執行 check_and_buff，完成或被中斷後，再執行簡易隨機移動。
+
+Pipeline & 中斷優先：所有動作（補血、Buff、移動）皆被 OCR 監測可即時中斷並切回補血，補血為最高優先。
+
+設計重點：
+
+參數集中：所有可調參數（座標、時間、機率等）統一置於檔案頂部的全域變數區，便於一鍵調整。
+
+擬人化：所有 sleep/延遲/按鍵持續均由隨機範圍 (如 0.1~0.25 秒) 實現，避免固定機械行為。
+
+狀態機明確：主流程嚴格區分 HEAL→GUARD→IDLE 三階段，並詳細 log 顯示便於 debug。
+
+Log 管理：啟動時自動清除 monk/debug/log.txt；所有 log 均以 [%Y-%m-%d %H:%M:%S] [monk] 前綴，輸出到該檔案及 console。
+
+最近修改：
+
+log 檔清除：每次啟動前自動刪除舊有 monk/debug/log.txt。
+
+預設 Region：REGION_HP 更新為 {'top':1060,'left':560,'width':92,'height':24}。
+
+移動機率：新增 HEAL_MOVE_CHANCE（補血期間移動機率）與 IDLE_MOVE_CHANCE（空閒期間移動機率）兩個可調參數。
+
+補血機制調整：改為長按補血鍵 3~5 秒；若期間仍偵測到血量 < 滿血，即刻重新長按。
+
+Buff-only 首次觸發：Buff-only 模式首次啟動無需等待 BUFF_INTERVAL_SEC，直接執行一輪 buff，之後再依間隔計時。
+
+tool/auto_buff_test.py/auto_buff_test.py
+
+功能：buff 技能單元測試腳本，驗證 buff 行為與自動移動邏輯。
+
+tool/show_coord.py
+
+功能：滑鼠全域雙擊座標記錄＋鍵盤按壓持續時間顯示工具（PyQt5 UI）。
+
+全域設計原則
+
+模組化：各功能腳本/函式庫各司其職，不互相耦合。
+
+參數集中管理：每支程式檔最上方統一定義所有可調參數與功能開關。
+
+最高原則：補血永遠最高優先，任何流程/延遲皆不可阻擋補血請求。
+
+Pipeline 架構：OCR 與動作並行，動作期間皆允許 OCR 隨時中斷並切回補血。
+
+Log 與 Debug：
+
+每次啟動自動清除舊 log.txt。
+
+Log 輸出同時印到 console，並以時間戳與 [monk]、[autobuff] 前綴。
+
+擬人化行為：所有自動化操作必須加入隨機延遲/間隔/持續，符合人類反應特性。
+
+禁止逆向/記憶體操作：僅可使用螢幕截圖、OCR、鍵鼠模擬。
+
+程式撰寫規範
+
+所有可調參數（鍵位、延遲、區域座標等）必須統一放置於檔首全域變數區，並註解說明。
+
+功能開關：所有主要功能（Buff、移動、補血、debug log、存檔）皆需可透過全域變數一鍵開/關。
+
+隨機延遲：所有 sleep/按鍵持續/間隔必須使用隨機範圍，並在程式中顯式記錄所用延遲值。
+
+Log 輸出：log 皆需同時輸出至 console 與檔案，格式 [%Y-%m-%d %H:%M:%S] [模組] 訊息。
+
+清晰註解：程式區塊需明確註解步驟與狀態機意圖，確保易讀易維護。
+
+AI 回覆規範：
+
+先重述用戶需求，再呈現推理流程，最後提供完整可執行 code。
+
+每次需求/修改皆須更新 manual.txt。
+
+常用安裝指令
+
+pip install pyautogui pynput pillow opencv-python mss PyQt5
+
+如需補充細項/微調格式，請直接告知。此 manual.txt 為本專案唯一設計、開發、debug、維護依據。任何疑問、查詢、code 準則，請優先檢查本文件。

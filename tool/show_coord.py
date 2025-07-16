@@ -1,82 +1,131 @@
-import tkinter as tk
-import pyautogui
-from pynput import mouse
+import sys
+import threading
 import time
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QPushButton, QVBoxLayout
+from PyQt5.QtCore import Qt
+from pynput import mouse, keyboard
 
-class CoordTool:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("滑鼠座標紀錄工具")
-        self.root.geometry("800x300")
-        self.root.resizable(False, False)
+MONITOR_KEYS = ['ctrl', 'space']
 
-        self.xy1 = None
-        self.xy2 = None
+class DoubleClickRecorder(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("全域滑鼠雙擊+按鍵時間")
+        self.setGeometry(350, 300, 400, 250)
 
+        self.label1 = QLabel("第一次雙擊：尚未記錄")
+        self.label2 = QLabel("第二次雙擊：尚未記錄")
+        self.label3 = QLabel("區域尺寸：尚未計算")
+        self.key_label = QLabel("按鍵狀態")
+        self.timing_label = QLabel("")
+        self.reset_btn = QPushButton("重置")
+        self.reset_btn.clicked.connect(self.reset_all)
+
+        vbox = QVBoxLayout()
+        vbox.addWidget(self.label1)
+        vbox.addWidget(self.label2)
+        vbox.addWidget(self.label3)
+        vbox.addWidget(self.key_label)
+        vbox.addWidget(self.timing_label)
+        vbox.addWidget(self.reset_btn)
+        self.setLayout(vbox)
+
+        self.pos1 = None
+        self.pos2 = None
         self.last_click_time = 0
-        self.double_click_interval = 0.35  # 連點兩下最大間隔（秒）
+        self.last_is_first = True
+        self.pressed_times = {}  # key: time
 
-        self.label_live = tk.Label(root, text="即時座標：", font=("Consolas", 16))
-        self.label_live.pack(pady=5)
+        threading.Thread(target=self.mouse_thread, daemon=True).start()
+        threading.Thread(target=self.key_thread, daemon=True).start()
 
-        self.label_1 = tk.Label(root, text="雙擊#1：-", font=("Consolas", 14), fg="blue")
-        self.label_1.pack()
-        self.label_2 = tk.Label(root, text="雙擊#2：-", font=("Consolas", 14), fg="blue")
-        self.label_2.pack()
-        self.label_diff = tk.Label(root, text="差值：-", font=("Consolas", 14), fg="green")
-        self.label_diff.pack(pady=5)
+    # --- 滑鼠 ---
+    def mouse_thread(self):
+        with mouse.Listener(on_click=self.on_mouse_click) as listener:
+            listener.join()
 
-        self.btn_reset = tk.Button(root, text="Reset", font=("Consolas", 12), command=self.reset)
-        self.btn_reset.pack(pady=7)
-
-        # 啟動全域滑鼠監聽
-        self.listener = mouse.Listener(on_click=self.on_global_click)
-        self.listener.start()
-
-        self.update_position()
-
-    def update_position(self):
-        x, y = pyautogui.position()
-        self.label_live.config(text=f"即時座標：X:{x}  Y:{y}")
-        self.root.after(30, self.update_position)
-
-    def on_global_click(self, x, y, button, pressed):
-        # 只處理左鍵「按下」事件
+    def on_mouse_click(self, x, y, button, pressed):
         if pressed and button == mouse.Button.left:
             now = time.time()
-            if now - self.last_click_time < self.double_click_interval:
-                # 符合雙擊，主執行緒處理
-                self.root.after(0, self.record_double_click, x, y)
-                self.last_click_time = 0  # 重置，避免三連擊被認為兩次雙擊
+            if now - self.last_click_time < 0.35:
+                # 這一組雙擊完成：進行第一次or第二次紀錄
+                if self.last_is_first:
+                    self.pos1 = (x, y)
+                    self.pos2 = None
+                    self.update_ui("first", x, y)
+                    self.last_is_first = False
+                else:
+                    self.pos2 = (x, y)
+                    self.update_ui("second", x, y)
+                    self.calc_size()
+                    self.last_is_first = True
+                self.last_click_time = 0  # reset
             else:
-                self.last_click_time = now
+                self.last_click_time = now  # 第一擊
+                # 不直接加1：因為雙擊事件要等到第二下才成立
 
-    def record_double_click(self, x, y):
-        if self.xy1 is None:
-            self.xy1 = (x, y)
-            self.label_1.config(text=f"雙擊#1：X:{x}  Y:{y}")
-            self.label_2.config(text="雙擊#2：-")
-            self.label_diff.config(text="差值：-")
-            self.xy2 = None
-        elif self.xy2 is None:
-            self.xy2 = (x, y)
-            self.label_2.config(text=f"雙擊#2：X:{x}  Y:{y}")
-            self.calc_diff()
+    def update_ui(self, which, x, y):
+        if which == "first":
+            self.label1.setText(f"第一次雙擊：left={x}, top={y}")
+            self.label2.setText("第二次雙擊：尚未記錄")
+            self.label3.setText("區域尺寸：尚未計算")
+        elif which == "second":
+            self.label2.setText(f"第二次雙擊：left={x}, top={y}")
 
-    def calc_diff(self):
-        if self.xy1 and self.xy2:
-            dx = abs(self.xy2[0] - self.xy1[0])
-            dy = abs(self.xy2[1] - self.xy1[1])
-            self.label_diff.config(text=f"差值：ΔX={dx}  ΔY={dy}  (width={dx}, height={dy})")
+    def calc_size(self):
+        if self.pos1 and self.pos2:
+            width = abs(self.pos2[0] - self.pos1[0])
+            height = abs(self.pos2[1] - self.pos1[1])
+            self.label3.setText(f"區域尺寸：width={width}, height={height}")
 
-    def reset(self):
-        self.xy1 = None
-        self.xy2 = None
-        self.label_1.config(text="雙擊#1：-")
-        self.label_2.config(text="雙擊#2：-")
-        self.label_diff.config(text="差值：-")
+    # --- 鍵盤 ---
+    def key_thread(self):
+        with keyboard.Listener(on_press=self.on_press, on_release=self.on_release) as listener:
+            listener.join()
+
+    def _keyname(self, key):
+        if isinstance(key, keyboard.Key):
+            if key in [keyboard.Key.ctrl_l, keyboard.Key.ctrl_r]:
+                return 'ctrl'
+            if key == keyboard.Key.space:
+                return 'space'
+            return str(key).replace("Key.", "")
+        elif hasattr(key, 'char'):
+            return key.char
+        else:
+            return str(key)
+
+    def on_press(self, key):
+        keyname = self._keyname(key)
+        if keyname in MONITOR_KEYS and keyname not in self.pressed_times:
+            t = time.time()
+            self.pressed_times[keyname] = t
+            now_str = time.strftime("%H:%M:%S", time.localtime(t))
+            self.key_label.setText(f"[{now_str}] 按下 {keyname}")
+
+    def on_release(self, key):
+        keyname = self._keyname(key)
+        if keyname in MONITOR_KEYS and keyname in self.pressed_times:
+            t_release = time.time()
+            t_press = self.pressed_times.pop(keyname)
+            delta = t_release - t_press
+            now_str = time.strftime("%H:%M:%S", time.localtime(t_release))
+            self.key_label.setText(f"[{now_str}] 放開 {keyname}")
+            self.timing_label.setText(f"{keyname} 按壓時間：{delta:.3f} 秒")
+
+    # --- 重置 ---
+    def reset_all(self):
+        self.pos1 = None
+        self.pos2 = None
+        self.last_is_first = True
+        self.label1.setText("第一次雙擊：尚未記錄")
+        self.label2.setText("第二次雙擊：尚未記錄")
+        self.label3.setText("區域尺寸：尚未計算")
+        self.key_label.setText("按鍵狀態")
+        self.timing_label.setText("")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = CoordTool(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    win = DoubleClickRecorder()
+    win.show()
+    sys.exit(app.exec_())
